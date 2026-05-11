@@ -1,0 +1,7 @@
+services:
+  voice-agent:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    network_mode: host # Required for WebRTC/SIP low latency
