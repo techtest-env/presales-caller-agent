@@ -14,6 +14,7 @@ from livekit import agents, api
 from livekit.agents import AgentSession, Agent, RoomInputOptions
 from livekit.plugins import (
     openai,
+    anthropic,
     cartesia,
     deepgram,
     noise_cancellation,
@@ -77,18 +78,13 @@ def _build_llm(config_provider: str = None):
     """Configure the LLM provider based on config or env vars."""
     provider = (config_provider or os.getenv("LLM_PROVIDER", config.DEFAULT_LLM_PROVIDER)).lower()
 
-    if provider == "groq":
-        logger.info("Using Groq LLM")
-        return openai.LLM(
-            base_url="https://api.groq.com/openai/v1",
-            api_key=os.getenv("GROQ_API_KEY"),
-            model=os.getenv("GROQ_MODEL", config.GROQ_MODEL),
-            temperature=float(os.getenv("GROQ_TEMPERATURE", str(config.GROQ_TEMPERATURE))),
-        )
-    
     # Default to OpenAI
-    logger.info("Using OpenAI LLM")
-    return openai.LLM(model=config.DEFAULT_LLM_MODEL)
+    logger.info(f"Using OpenAI LLM | Model: {config.DEFAULT_LLM_MODEL}")
+    return openai.LLM(
+        model=os.getenv("OPENAI_MODEL", config.DEFAULT_LLM_MODEL),
+        api_key=os.getenv("OPENAI_API_KEY"),
+        temperature=config.OPENAI_TEMPERATURE,
+    )
 
 
 
@@ -341,19 +337,19 @@ async def entrypoint(ctx: agents.JobContext):
 
     session = AgentSession(
         vad=silero.VAD.load(
-            min_speech_duration=0.2,   # Require 200ms of actual speech (ignores background noise/breaths)
-            min_silence_duration=0.5   # LOWER LATENCY: Wait only 0.5s of silence before replying
+            min_speech_duration=0.05,  # Lowered to 50ms so it doesn't miss short words like "yes" or "no"
+            min_silence_duration=0.6   # Reverted back to 0.6 to prevent STT word chopping/hallucination
         ),
         stt=deepgram.STT(**stt_opts),
         llm=_build_llm(config_dict.get("model_provider")),
         tts=_build_tts(config_dict.get("model_provider"), config_dict.get("voice_id")),
         turn_handling={
             "endpointing": {
-                "min_delay": 0.4,
+                "min_delay": 0.4, # Stable value
                 "max_delay": 2.0
             },
             "interruption": {
-                "enabled": True, # Still allows you to interrupt if you talk properly
+                "enabled": True,
             }
         }
     )
