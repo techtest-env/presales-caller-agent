@@ -1,4 +1,5 @@
 import os
+import sys
 import certifi
 
 # Fix for macOS SSL Certificate errors - MUST be before other imports
@@ -334,8 +335,11 @@ class TransferFunctions(llm.ToolContext):
                 "Have a wonderful day!",
                 allow_interruptions=False
             )
-        else:
-            await asyncio.sleep(4)
+        elif self.session:
+            await self.session.say(
+                "No problem at all. We will be here whenever you are ready. Have a great day!",
+                allow_interruptions=False
+            )
 
         self._save_and_push({
             "property_type": property_type,
