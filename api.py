@@ -10,18 +10,14 @@ agent_process = None
 def start_agent():
     global agent_process
     print("Starting LiveKit agent worker...")
-    agent_log = open("agent.log", "a")
+    log_path = "/tmp/agent.log" if sys.platform != "win32" else "agent.log"
+    agent_log = open(log_path, "a")
     agent_process = subprocess.Popen(
         [sys.executable, "agent.py", "start"],
         stdout=agent_log,
         stderr=subprocess.STDOUT
     )
     print("LiveKit agent worker started.")
-
-@app.on_event("startup")
-def startup_event():
-    # Start the persistent agent worker in the background when the API boots up
-    start_agent()
 
 @app.on_event("shutdown")
 def shutdown_event():
