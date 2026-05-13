@@ -126,16 +126,21 @@ def process_and_push_to_db():
     print(f"Found {len(json_files)} call_result files to process.")
     
     for file_path in json_files:
-        with open(file_path, 'r') as f:
-            try:
+        call_data = None
+        try:
+            with open(file_path, 'r') as f:
                 call_data = json.load(f)
-            except json.JSONDecodeError:
-                print(f"Error parsing JSON in {file_path}. Skipping.")
-                continue
+        except json.JSONDecodeError:
+            print(f"Error parsing JSON in {file_path}. Skipping.")
+            continue
+        except Exception as e:
+            print(f"Error reading file {file_path}: {e}")
+            continue
             
-        inserted_id = push_single_to_db(call_data)
-        if inserted_id:
-            print(f"Successfully inserted record ID {inserted_id} from {file_path}")
+        if call_data:
+            inserted_id = push_single_to_db(call_data)
+            if inserted_id:
+                print(f"Successfully inserted record ID {inserted_id} from {file_path}")
             
     print("Database sync complete.")
 

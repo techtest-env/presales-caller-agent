@@ -7,7 +7,9 @@ os.environ['SSL_CERT_FILE'] = certifi.where()
 import logging
 import json
 import asyncio
-from datetime import datetime
+import copy
+import re
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 from livekit import agents, api
@@ -32,18 +34,129 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("outbound-agent")
 
 import config
-
-# TRUNK ID - Now loaded from config.py
-# You can find this by running 'python setup_trunk.py --list' or checking LiveKit Dashboard 
+import push_to_db
 
 
-def _build_tts(config_provider: str = None, config_voice: str = None):
+def parse_follow_up_time(time_str: str) -> str:
+    """Convert natural date strings to DD-MM-YYYY-HH:MM format."""
+    if not time_str or not time_str.strip():
+        return ""
+
+    time_str = time_str.lower().strip()
+    now = datetime.now()
+
+    # Extract time if mentioned (HH:MM or just hour)
+    time_match = re.search(r'(\d{1,2}):?(\d{0,2})\s*(am|pm|am\.|pm\.)?', time_str)
+    hour, minute, period = 10, 0, None
+    if time_match:
+        hour = int(time_match.group(1))
+        minute = int(time_match.group(2)) if time_match.group(2) else 0
+        period = time_match.group(3)
+        if period and 'pm' in period and hour < 12:
+            hour += 12
+        elif period and 'am' in period and hour == 12:
+            hour = 0
+
+    # Determine target date
+    target_date = now
+
+    if 'today' in time_str:
+        target_date = now
+    elif 'tomorrow' in time_str:
+        target_date = now + timedelta(days=1)
+    elif 'next week' in time_str or 'next monday' in time_str:
+        target_date = now + timedelta(weeks=1)
+    elif 'weekend' in time_str:
+        days_ahead = 5 - now.weekday()
+        if days_ahead <= 0:
+            days_ahead += 7
+        target_date = now + timedelta(days=days_ahead)
+    else:
+        day_match = re.search(r'(\d{1,2})', time_str)
+        month_match = re.search(
+            r'(january|february|march|april|may|june|july|august|september|october|november|december'
+            r'|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)',
+            time_str
+        )
+
+        if day_match:
+            day = int(day_match.group(1))
+            month = now.month
+            year = now.year
+
+            if month_match:
+                month_str = month_match.group(1)
+                months = {
+                    'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
+                    'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11, 'december': 12,
+                    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'jun': 6, 'jul': 7, 'aug': 8,
+                    'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
+                }
+                month = months.get(month_str, now.month)
+
+            try:
+                target_date = datetime(year, month, day, hour, minute)
+                if target_date < now:
+                    target_date = datetime(year + 1, month, day, hour, minute)
+            except ValueError:
+                target_date = now + timedelta(days=1)
+        else:
+            target_date = now + timedelta(days=1)
+            target_date = target_date.replace(hour=hour, minute=minute)
+
+    target_date = target_date.replace(hour=hour, minute=minute)
+    return target_date.strftime("%d-%m-%Y-%H:%M")
+
+
+def _detect_language_code(text: str) -> str:
+    """
+    Detect language from customer speech and return the correct Sarvam language code.
+    Scores Telugu and Hindi marker words; falls back to en-IN if neither detected.
+    """
+    telugu_markers = [
+        "andi", "ra", "ga", "undi", "ledu", "meeru", "mee", "ema",
+        "cheppandi", "avunu", "kaadu", "ante", "ayya", "akka", "anna",
+        "babu", "ikkade", "akkade", "ela", "enduku", "chuda", "cheyyi",
+        "vaddu", "sari", "okay ga", "telugu", "maku", "meeru", "miru"
+    ]
+    hindi_markers = [
+        "haan", "nahi", "kya", "hai", "bhai", "theek", "acha", "nhi",
+        "bol", "kar", "mujhe", "mera", "main", "aap", "tum", "yaar",
+        "bilkul", "zaroor", "chaliye", "batao", "suniye", "ji", "huh",
+        "woh", "yeh", "hindi", "dekhte", "sochte", "thoda"
+    ]
+
+    text_lower = text.lower()
+
+    telugu_score = sum(1 for word in telugu_markers if word in text_lower)
+    hindi_score = sum(1 for word in hindi_markers if word in text_lower)
+
+    if telugu_score > hindi_score:
+        logger.info(f"Language detected: Telugu (te-IN) | score={telugu_score}")
+        return "te-IN"
+    elif hindi_score > 0:
+        logger.info(f"Language detected: Hindi (hi-IN) | score={hindi_score}")
+        return "hi-IN"
+    else:
+        logger.info("Language detected: English (en-IN)")
+        return "en-IN"
+
+
+def _build_tts(config_provider: str = None, config_voice: str = None, language_code: str = None):
     """Configure the Text-to-Speech provider based on env vars or dynamic config."""
-    # Priority: Config > Env Var > Default
     provider = (config_provider or os.getenv("TTS_PROVIDER", config.DEFAULT_TTS_PROVIDER)).lower()
-    
-    # Sarvam voice names — if any of these are set, force Sarvam provider
-    SARVAM_VOICES = {"anushka", "aravind", "amartya", "dhruv", "ritu", "meera", "arjun", "maya", "neel", "maitreyi", "karun", "arvind"}
+
+    # All known Sarvam voices across bulbul:v2 and bulbul:v3
+    SARVAM_VOICES = {
+        # bulbul:v2 voices
+        "anushka", "manisha", "vidya", "arya", "abhilash", "karun", "hitesh",
+        # bulbul:v3 voices
+        "shubh", "aditya", "ritu", "priya", "neha", "rahul", "pooja", "rohan",
+        "simran", "kavya", "amit", "dev", "ishita", "shreya", "ratan", "varun",
+        "manan", "sumit", "roopa", "kabir", "aayan", "ashutosh", "advait",
+        "amelia", "sophia", "anand", "tanya", "tarun", "sunny", "mani", "gokul",
+        "vijay", "shruti", "suhani", "mohit", "kavitha", "rehan", "soham", "rupali"
+    }
     if config_voice and config_voice.lower() in SARVAM_VOICES:
         provider = "sarvam"
 
@@ -52,12 +165,12 @@ def _build_tts(config_provider: str = None, config_voice: str = None):
         model = os.getenv("CARTESIA_TTS_MODEL", config.CARTESIA_MODEL)
         voice = os.getenv("CARTESIA_TTS_VOICE", config.CARTESIA_VOICE)
         return cartesia.TTS(model=model, voice=voice)
-    
+
     if provider == "sarvam":
-        # Resolve voice: dynamic override > env var > config default
         voice = config_voice or os.getenv("SARVAM_VOICE", config.DEFAULT_TTS_VOICE)
         model = os.getenv("SARVAM_TTS_MODEL", config.SARVAM_MODEL)
-        language = os.getenv("SARVAM_LANGUAGE", config.SARVAM_LANGUAGE)
+        # Priority: passed language_code > env var > config default
+        language = language_code or os.getenv("SARVAM_LANGUAGE", config.SARVAM_LANGUAGE)
         api_key = os.getenv("SARVAM_API_KEY")
         logger.info(f"Using Sarvam TTS | Voice: {voice} | Model: {model} | Language: {language}")
         return sarvam.TTS(model=model, speaker=voice, target_language_code=language, api_key=api_key)
@@ -78,14 +191,22 @@ def _build_llm(config_provider: str = None):
     """Configure the LLM provider based on config or env vars."""
     provider = (config_provider or os.getenv("LLM_PROVIDER", config.DEFAULT_LLM_PROVIDER)).lower()
 
+    if provider == "groq":
+        logger.info(f"Using Groq LLM | Model: {config.DEFAULT_LLM_MODEL}")
+        return openai.LLM(
+            base_url="https://api.groq.com/openai/v1",
+            model=os.getenv("GROQ_MODEL", config.DEFAULT_LLM_MODEL),
+            api_key=os.getenv("GROQ_API_KEY"),
+            temperature=getattr(config, "GROQ_TEMPERATURE", getattr(config, "OPENAI_TEMPERATURE", 0.1)),
+        )
+
     # Default to OpenAI
     logger.info(f"Using OpenAI LLM | Model: {config.DEFAULT_LLM_MODEL}")
     return openai.LLM(
         model=os.getenv("OPENAI_MODEL", config.DEFAULT_LLM_MODEL),
         api_key=os.getenv("OPENAI_API_KEY"),
-        temperature=config.OPENAI_TEMPERATURE,
+        temperature=getattr(config, "OPENAI_TEMPERATURE", getattr(config, "GROQ_TEMPERATURE", 0.1)),
     )
-
 
 
 class TransferFunctions(llm.ToolContext):
@@ -96,47 +217,34 @@ class TransferFunctions(llm.ToolContext):
         self.lead_id = lead_id
         self.name = name
         self.session = None  # Set after AgentSession is created
-        # Track whether end_call was already invoked to prevent double-saves
         self._call_ended = False
 
-    @llm.function_tool(description="Transfer the call to a human support agent or another phone number.")
     async def transfer_call(self, destination: Optional[str] = None):
-        """
-        Transfer the call.
-        """
+        """Transfer the call (deactivated — decorator removed intentionally)."""
         if destination is None:
-            destination = config.DEFAULT_TRANSFER_NUMBER
+            destination = getattr(config, "DEFAULT_TRANSFER_NUMBER", None)
             if not destination:
-                 return "Error: No default transfer number configured."
+                return "Error: No default transfer number configured."
         if "@" not in destination:
-            # If no domain is provided, append the SIP domain
-            if config.SIP_DOMAIN:
-                # Ensure clean number (strip tel: or sip: prefix if present but no domain)
+            if getattr(config, "SIP_DOMAIN", None):
                 clean_dest = destination.replace("tel:", "").replace("sip:", "")
                 destination = f"sip:{clean_dest}@{config.SIP_DOMAIN}"
             else:
-                # Fallback to tel URI if no domain configured
                 if not destination.startswith("tel:") and not destination.startswith("sip:"):
-                     destination = f"tel:{destination}"
+                    destination = f"tel:{destination}"
         elif not destination.startswith("sip:"):
-             destination = f"sip:{destination}"
-        
+            destination = f"sip:{destination}"
+
         logger.info(f"Transferring call to {destination}")
-        
-        # Determine the participant identity
-        # For outbound calls initiated by this agent, the participant identity is typically "sip_<phone_number>"
-        # For inbound, we might need to find the remote participant.
+
         participant_identity = None
-        
-        # If we stored the phone number from metadata, we can construct the identity
         if self.phone_number:
             participant_identity = f"sip_{self.phone_number}"
         else:
-            # Try to find a participant that is NOT the agent
             for p in self.ctx.room.remote_participants.values():
                 participant_identity = p.identity
                 break
-        
+
         if not participant_identity:
             logger.error("Could not determine participant identity for transfer")
             return "Failed to transfer: could not identify the caller."
@@ -179,7 +287,6 @@ class TransferFunctions(llm.ToolContext):
         except Exception as e:
             logger.error(f"Failed to save call details: {e}")
 
-        # Push to Database
         try:
             import push_to_db
             inserted_id = push_to_db.push_single_to_db(lead_data)
@@ -203,7 +310,6 @@ class TransferFunctions(llm.ToolContext):
     ):
         """
         Ends the current call and disconnects the user.
-        Call this once the conversation is over — the system handles the closing message.
 
         Args:
             property_type: Type of property looking for (apartment or villa)
@@ -216,8 +322,8 @@ class TransferFunctions(llm.ToolContext):
         """
         logger.info("Agent is ending the call via end_call tool")
 
-        # For a completed qualification flow, speak the closing message explicitly.
-        # session.say() awaits TTS completion before returning — no race condition.
+        formatted_follow_up = parse_follow_up_time(follow_up_time)
+
         answers_collected = any([property_type, budget, areas, bhk])
         if answers_collected and self.session:
             logger.info("Speaking closing message via session.say()...")
@@ -228,7 +334,6 @@ class TransferFunctions(llm.ToolContext):
                 allow_interruptions=False
             )
         else:
-            # Exit scenario: LLM already spoke the exit phrase, give it time to finish
             await asyncio.sleep(4)
 
         self._save_and_push({
@@ -237,7 +342,7 @@ class TransferFunctions(llm.ToolContext):
             "areas": areas,
             "bhk": bhk,
             "possession_timeline": possession_timeline,
-            "follow_up_time": follow_up_time,
+            "follow_up_time": formatted_follow_up,
             "additional_notes": additional_notes
         })
 
@@ -252,11 +357,9 @@ class TransferFunctions(llm.ToolContext):
         self.ctx.shutdown()
         return "Call ended successfully."
 
+
 class OutboundAssistant(Agent):
-    """
-    An AI agent tailored for outbound calls.
-    Attempts to be helpful and concise.
-    """
+    """An AI agent tailored for outbound calls."""
     def __init__(self, tools: list, custom_instructions: str = None) -> None:
         super().__init__(
             instructions=custom_instructions or config.SYSTEM_PROMPT,
@@ -264,12 +367,10 @@ class OutboundAssistant(Agent):
         )
 
 
-
-
 async def entrypoint(ctx: agents.JobContext):
     """
     Main entrypoint for the agent.
-    
+
     For outbound calls:
     1. Checks for 'phone_number' in the job metadata.
     2. Connects to the room.
@@ -277,13 +378,12 @@ async def entrypoint(ctx: agents.JobContext):
     4. Waits for answer before speaking.
     """
     logger.info(f"Connecting to room: {ctx.room.name}")
-    
-    # parse the phone number AND config from the metadata
+
     phone_number = None
     lead_id = None
     name = None
     config_dict = {}
-    
+
     # Check Job Metadata (Legacy/Dispatch)
     try:
         if ctx.job.metadata:
@@ -294,7 +394,7 @@ async def entrypoint(ctx: agents.JobContext):
             config_dict = data
     except Exception:
         pass
-        
+
     # Check Room Metadata (Dashboard/Route.ts) - Overrides Job Metadata if present
     try:
         if ctx.room.metadata:
@@ -305,48 +405,55 @@ async def entrypoint(ctx: agents.JobContext):
                 lead_id = data.get("lead_id") or data.get("userid")
             if data.get("name"):
                 name = data.get("name")
-            config_dict.update(data) # Merge configs
+            config_dict.update(data)
     except Exception:
         logger.warning("No valid JSON metadata found in Room.")
 
     # Substitute leadName in instructions and greeting
     lead_name_str = name if name else "there"
-    today_date_str = datetime.now().strftime("%A, %d %B %Y")  # e.g. "Sunday, 11 May 2026"
+    today_date_str = datetime.now().strftime("%A, %d %B %Y")
     custom_instructions = config.SYSTEM_PROMPT.replace("{{leadName}}", lead_name_str).replace("{{today_date}}", today_date_str)
-    custom_greeting = config.INITIAL_GREETING.replace("{{leadName}}", lead_name_str)
+    custom_greeting = getattr(config, "INITIAL_GREETING", "Hi, am I speaking with {{leadName}}?").replace("{{leadName}}", lead_name_str)
 
     # Initialize function context
     fnc_ctx = TransferFunctions(ctx, phone_number, lead_id, name)
 
-    # Build STT options dynamically — inject the lead's actual name into
-    # Deepgram keywords so it recognizes their name correctly on
-    # telephony-quality audio, regardless of who the lead is.
-    import copy
+    # Build STT options dynamically
     stt_opts = copy.deepcopy(
-        getattr(config, "DEEPGRAM_OPTIONS", {"model": config.STT_MODEL, "language": config.STT_LANGUAGE})
+        getattr(config, "DEEPGRAM_OPTIONS", {
+            "model": getattr(config, "STT_MODEL", "nova-2"),
+            "language": getattr(config, "STT_LANGUAGE", "en")
+        })
     )
     if name:
         existing_keywords = stt_opts.get("keywords", [])
         existing_words = {kw[0] if isinstance(kw, tuple) else kw for kw in existing_keywords}
-        # Boost full name and each word separately (handles multi-word names)
         for word in set([name] + name.split()):
             if word not in existing_words:
                 existing_keywords.append((word, 3))
         stt_opts["keywords"] = existing_keywords
         logger.info(f"STT keyword boost added for lead name: {name}")
 
+    # --- Language tracking (mutable container so the closure can update it) ---
+    # Start with en-IN for the greeting; switches automatically on first Telugu/Hindi response
+    detected_lang = {"code": config_dict.get("language", config.SARVAM_LANGUAGE)}
+
     session = AgentSession(
         vad=silero.VAD.load(
-            min_speech_duration=0.05,  # Lowered to 50ms so it doesn't miss short words like "yes" or "no"
-            min_silence_duration=0.6   # Reverted back to 0.6 to prevent STT word chopping/hallucination
+            min_speech_duration=0.05,
+            min_silence_duration=0.3
         ),
         stt=deepgram.STT(**stt_opts),
         llm=_build_llm(config_dict.get("model_provider")),
-        tts=_build_tts(config_dict.get("model_provider"), config_dict.get("voice_id")),
+        tts=_build_tts(
+            config_dict.get("model_provider"),
+            config_dict.get("voice_id"),
+            language_code=detected_lang["code"]
+        ),
         turn_handling={
             "endpointing": {
-                "min_delay": 0.4, # Stable value
-                "max_delay": 2.0
+                "min_delay": 0.2,
+                "max_delay": 1.5
             },
             "interruption": {
                 "enabled": True,
@@ -357,44 +464,62 @@ async def entrypoint(ctx: agents.JobContext):
     # Give end_call tool access to session so it can await TTS before disconnecting
     fnc_ctx.session = session
 
-    outbound_agent = OutboundAssistant(tools=list(fnc_ctx.function_tools.values()), custom_instructions=custom_instructions)
-    # Start the session
+    # --- Dynamic language detection: swap TTS on every customer utterance ---
+    @session.on("user_speech_committed")
+    def on_user_speech(event):
+        transcript = getattr(event, "transcript", "") or ""
+        if not transcript.strip():
+            return
+
+        new_lang = _detect_language_code(transcript)
+
+        # Only rebuild TTS if the language actually changed
+        if new_lang != detected_lang["code"]:
+            detected_lang["code"] = new_lang
+            logger.info(f"Language switched to {new_lang}. Rebuilding TTS...")
+            try:
+                session.update_options(
+                    tts=_build_tts(
+                        config_dict.get("model_provider"),
+                        config_dict.get("voice_id"),
+                        language_code=new_lang
+                    )
+                )
+                logger.info(f"TTS successfully updated to {new_lang}")
+            except Exception as e:
+                logger.error(f"Failed to update TTS language: {e}")
+
+    outbound_agent = OutboundAssistant(
+        tools=list(fnc_ctx.function_tools.values()),
+        custom_instructions=custom_instructions
+    )
+
     await session.start(
         room=ctx.room,
         agent=outbound_agent,
         room_input_options=RoomInputOptions(
             noise_cancellation=noise_cancellation.BVCTelephony(),
-            close_on_disconnect=True, # Close room when agent disconnects
+            close_on_disconnect=True,
         ),
     )
 
-    # Logic to dial out:
-    # 1. If 'phone_number' is present, we MIGHT need to dial.
-    # 2. Check if a SIP participant is already in the room (Dashboard dispatch case).
-    
     should_dial = False
     if phone_number:
-        # Check if any remote participant looks like our user (sip_PHONE)
         user_already_here = False
         for p in ctx.room.remote_participants.values():
             if f"sip_{phone_number}" in p.identity or "sip_" in p.identity:
                 user_already_here = True
                 break
-        
+
         if not user_already_here:
             should_dial = True
             logger.info("User not in room. Agent will initiate dial-out.")
         else:
-            logger.info("User already in room (Dashboard dispatched). output Only generated greeting.")
+            logger.info("User already in room (Dashboard dispatched). Only generated greeting.")
 
     if should_dial:
         logger.info(f"Initiating outbound SIP call to {phone_number}...")
         try:
-            # Create a SIP participant to dial out
-            # This effectively "calls" the phone number and brings them into this room
-            # --- CONNECTING TO THE PHONE NETWORK ---
-            # This step actually "dials" the number using Vobiz (SIP Trunk).
-            # It invites the phone number into this digital room.
             customer_name = name or "Customer"
             await ctx.api.sip.create_sip_participant(
                 api.CreateSIPParticipantRequest(
@@ -408,22 +533,38 @@ async def entrypoint(ctx: agents.JobContext):
                 )
             )
             logger.info("Call answered! Agent is now listening.")
-            
-            # Have the agent speak it out loud (session.say automatically handles chat context)
-            await session.say(custom_greeting, allow_interruptions=True)
-            
+            await asyncio.sleep(0.5)
+            logger.info(f"Speaking opening greeting for {lead_name_str}...")
+
+# Part 1: Identity check — wait for them to confirm before continuing
+            greeting_part1 = f"Hi, am I speaking with {lead_name_str}?"
+            greeting_part2 = f"Hi! I'm Rishika from Relai. You were looking at properties in Hyderabad recently. Just have 6 quick questions to find your match. Is now a good time?"
+
+            await session.say(greeting_part1, allow_interruptions=False)
+            await asyncio.sleep(1.5)  # pause — feels natural, like waiting for them to say "yes"
+            await session.say(greeting_part2, allow_interruptions=True)
+
+            logger.info("Greeting spoken. Now waiting for user response to continue conversation.")
+            # logger.info(f"Speaking opening greeting for {lead_name_str}...")
+            # await session.say(custom_greeting, allow_interruptions=True)
+            # logger.info("Greeting spoken. Now waiting for user response to continue conversation.")
+
         except Exception as e:
             logger.error(f"Failed to place outbound call: {e}")
-            # Ensure we clean up if the call fails
+            import traceback
+            logger.error(traceback.format_exc())
             ctx.shutdown()
     else:
-        # Fallback for inbound calls (if this agent is used for that) OR Dashboard calls where user is already there
-        logger.info("Detecting if we should greet...")
-        # Give a small delay for audio to stabilize if user just joined
-        await session.say(config.fallback_greeting, allow_interruptions=True)
+        logger.info("User already in room. Speaking opening greeting.")
+        greeting_part1 = f"Hi, am I speaking with {lead_name_str}?"
+        greeting_part2 = f"Hi! I'm Priya from Relai. You were looking at properties in Hyderabad recently. Just have 6 quick questions to find your match. Is now a good time?"
+        await session.say(greeting_part1, allow_interruptions=False)
+        await asyncio.sleep(1.5)
+        await session.say(greeting_part2, allow_interruptions=True)
+        # logger.info("User already in room. Speaking opening greeting.")
+        # await session.say(custom_greeting, allow_interruptions=True)
 
-    # If the user hangs up abruptly (without end_call being triggered),
-    # save whatever partial data we have so it's not lost.
+    # If the user hangs up abruptly, save whatever partial data we have
     @ctx.room.on("disconnected")
     def on_disconnected():
         logger.info("Room disconnected. Checking if call data needs to be saved...")
@@ -439,12 +580,14 @@ async def entrypoint(ctx: agents.JobContext):
         logger.info("Cleanly shutting down agent process.")
         ctx.shutdown()
 
+    logger.info("Session is now running. Agent is waiting for user input...")
+    await session.wait_for_inactive()
+
 
 if __name__ == "__main__":
-    # The agent name "outbound-caller" is used by the dispatch script to find this worker
     agents.cli.run_app(
         agents.WorkerOptions(
             entrypoint_fnc=entrypoint,
-            agent_name="outbound-caller", 
+            agent_name="outbound-caller",
         )
     )

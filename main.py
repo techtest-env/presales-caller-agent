@@ -63,7 +63,7 @@ def main():
         stdout=agent_log,
         stderr=subprocess.STDOUT
     )
-    time.sleep(5)  # Give agent time to boot and register with LiveKit
+    time.sleep(8)  # Increased from 5s - give agent time to boot and register with LiveKit
 
     # Step 2 — Make the call
     call_result = run_command([
