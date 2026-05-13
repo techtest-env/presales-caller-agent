@@ -454,7 +454,7 @@ async def entrypoint(ctx: agents.JobContext):
         turn_handling={
             "endpointing": {
                 "min_delay": 0.2,
-                "max_delay": 1.5
+                "max_delay": 0.9
             },
             "interruption": {
                 "enabled": True,
@@ -534,15 +534,14 @@ async def entrypoint(ctx: agents.JobContext):
                 )
             )
             logger.info("Call answered! Agent is now listening.")
-            await asyncio.sleep(0.5)
             logger.info(f"Speaking opening greeting for {lead_name_str}...")
 
 # Part 1: Identity check — wait for them to confirm before continuing
             greeting_part1 = f"Hi, am I speaking with {lead_name_str}?"
-            greeting_part2 = f"Hi! I'm Rishika from Relai. You were looking at properties in Hyderabad recently. Just have 6 quick questions to find your match. Is now a good time?"
+            greeting_part2 = f"Hi! I'm Priya from Relai. You were looking at properties in Hyderabad recently, and I'd love to help find the right match for you. Do you have a couple of minutes?"
 
             await session.say(greeting_part1, allow_interruptions=False)
-            await asyncio.sleep(1.5)  # pause — feels natural, like waiting for them to say "yes"
+            await asyncio.sleep(1.2)  # brief pause — lets user say "yes who is this?" naturally
             await session.say(greeting_part2, allow_interruptions=True)
 
             logger.info("Greeting spoken. Now waiting for user response to continue conversation.")
@@ -558,9 +557,9 @@ async def entrypoint(ctx: agents.JobContext):
     else:
         logger.info("User already in room. Speaking opening greeting.")
         greeting_part1 = f"Hi, am I speaking with {lead_name_str}?"
-        greeting_part2 = f"Hi! I'm Priya from Relai. You were looking at properties in Hyderabad recently. Just have 6 quick questions to find your match. Is now a good time?"
+        greeting_part2 = f"Hi! I'm Priya from Relai. You were looking at properties in Hyderabad recently, and I'd love to help find the right match for you. Do you have a couple of minutes?"
         await session.say(greeting_part1, allow_interruptions=False)
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(1.2)  # brief pause — lets user say "yes who is this?" naturally
         await session.say(greeting_part2, allow_interruptions=True)
         # logger.info("User already in room. Speaking opening greeting.")
         # await session.say(custom_greeting, allow_interruptions=True)
