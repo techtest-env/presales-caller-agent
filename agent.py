@@ -278,8 +278,9 @@ class TransferFunctions(llm.ToolContext):
             "call_time": datetime.now().isoformat(),
             "answers": answers
         }
-        os.makedirs("call_results", exist_ok=True)
-        filename = f"call_results/lead_{self.lead_id or 'unknown'}_{datetime.now().strftime('%Y%m%d%H%M%S')}.json"
+        results_dir = "/tmp/call_results" if sys.platform != "win32" else "call_results"
+        os.makedirs(results_dir, exist_ok=True)
+        filename = f"{results_dir}/lead_{self.lead_id or 'unknown'}_{datetime.now().strftime('%Y%m%d%H%M%S')}.json"
         try:
             with open(filename, "w") as f:
                 json.dump(lead_data, f, indent=4)

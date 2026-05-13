@@ -1,30 +1,16 @@
 import subprocess
 import sys
+import os
+import glob
+import json
+import time
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 app = FastAPI(title="Relai Caller Agent API")
 
-agent_process = None
-
-def start_agent():
-    global agent_process
-    print("Starting LiveKit agent worker...")
-    log_path = "/tmp/agent.log" if sys.platform != "win32" else "agent.log"
-    agent_log = open(log_path, "a")
-    agent_process = subprocess.Popen(
-        [sys.executable, "agent.py", "start"],
-        stdout=agent_log,
-        stderr=subprocess.STDOUT
-    )
-    print("LiveKit agent worker started.")
-
-@app.on_event("shutdown")
-def shutdown_event():
-    global agent_process
-    if agent_process:
-        print("Shutting down agent process...")
-        agent_process.terminate()
+RESULTS_DIR = "/tmp/call_results" if sys.platform != "win32" else "call_results"
+LOG_PATH = "/tmp/agent.log" if sys.platform != "win32" else "agent.log"
 
 class CallRequest(BaseModel):
     userid: str
@@ -33,26 +19,41 @@ class CallRequest(BaseModel):
 
 @app.post("/call")
 async def trigger_call(request: CallRequest):
-    """
-    Endpoint for n8n to trigger a call.
-    """
-    try:
-        # Dispatch the call via make_call.py
-        result = subprocess.run(
-            [sys.executable, "make_call.py", "--userid", request.userid, "--name", request.name, "--phone", request.phone],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode != 0:
-            raise HTTPException(status_code=500, detail=f"Failed to dispatch call: {result.stderr}")
-        
-        return {
-            "status": "success", 
-            "message": f"Call successfully dispatched to {request.phone}", 
-            "userid": request.userid
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # Start the LiveKit agent worker
+    agent_log = open(LOG_PATH, "a")
+    agent_process = subprocess.Popen(
+        [sys.executable, "agent.py", "start"],
+        stdout=agent_log,
+        stderr=subprocess.STDOUT
+    )
+    time.sleep(8)  # Wait for agent to boot and register with LiveKit
+
+    # Dispatch the call
+    result = subprocess.run(
+        [sys.executable, "make_call.py",
+         "--userid", request.userid,
+         "--name", request.name,
+         "--phone", request.phone],
+        capture_output=True,
+        text=True
+    )
+    if result.returncode != 0:
+        agent_process.terminate()
+        raise HTTPException(status_code=500, detail=f"Failed to dispatch call: {result.stderr}")
+
+    # Wait for the call to complete
+    agent_process.wait()
+
+    # Read the result file written by agent.py
+    result_files = glob.glob(f"{RESULTS_DIR}/lead_{request.userid}_*.json")
+    if not result_files:
+        raise HTTPException(status_code=500, detail="Call ended but no result file was saved.")
+
+    latest_file = max(result_files, key=os.path.getctime)
+    with open(latest_file, "r") as f:
+        call_output = json.load(f)
+        call_output["call_status"] = "completed"
+        return call_output
 
 @app.get("/")
 def health_check():
