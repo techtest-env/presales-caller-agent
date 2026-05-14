@@ -54,10 +54,12 @@ def main():
                 sys.stderr.write(f"[AGENT LOG] {line}")
                 sys.stderr.flush()
 
+    agent_log = open("agent.log", "a")  # Create/open file before thread tries to read it
+    agent_log.flush()
+
     # Start live log streaming in the background (to stderr so stdout stays clean for n8n)
     threading.Thread(target=tail_log, args=("agent.log",), daemon=True).start()
 
-    agent_log = open("agent.log", "a")  # Append — logs are preserved across calls
     agent_process = subprocess.Popen(
         [venv_python, "agent.py", "start"],
         stdout=agent_log,
