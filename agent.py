@@ -299,7 +299,7 @@ class TransferFunctions(llm.ToolContext):
         except Exception as e:
             logger.error(f"Error calling push_to_db: {e}")
 
-    @llm.function_tool(description="End the current call. Call this when all questions are answered OR when the user wants to stop. Pass all collected answers as arguments.")
+    @llm.function_tool(description="End the call. Call ONLY after all 6 questions (property_type, budget, areas, bhk, possession_timeline, follow_up_time) have been explicitly answered by the customer. Do NOT call this mid-conversation or because the user said something unexpected. If the user wants to stop, confirm once before ending.")
     async def end_call(
         self,
         property_type: str = "",
@@ -446,7 +446,7 @@ async def entrypoint(ctx: agents.JobContext):
     session = AgentSession(
         vad=silero.VAD.load(
             min_speech_duration=0.05,
-            min_silence_duration=0.3
+            min_silence_duration=0.5  # wait longer to ensure user has fully finished speaking
         ),
         stt=deepgram.STT(**stt_opts),
         llm=_build_llm(config_dict.get("model_provider")),
@@ -457,11 +457,12 @@ async def entrypoint(ctx: agents.JobContext):
         ),
         turn_handling={
             "endpointing": {
-                "min_delay": 0.2,
-                "max_delay": 0.9
+                "min_delay": 0.3,
+                "max_delay": 1.2
             },
             "interruption": {
                 "enabled": True,
+                "min_words": 1,
             }
         }
     )
