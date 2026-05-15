@@ -33,7 +33,8 @@ async def trigger_call(request: CallRequest):
     )
     if result.returncode != 0:
         agent_process.terminate()
-        raise HTTPException(status_code=500, detail=f"Failed to dispatch call: {result.stderr}")
+        error_detail = result.stderr.strip() or result.stdout.strip() or "make_call.py exited with no output"
+        raise HTTPException(status_code=500, detail=f"Failed to dispatch call: {error_detail}")
 
     return {"status": "success", "message": "Call dispatched"}
 
