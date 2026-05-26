@@ -1,3 +1,9 @@
+import sys
+import asyncio
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 import os
 import certifi
 
@@ -5,7 +11,6 @@ import certifi
 os.environ['SSL_CERT_FILE'] = certifi.where()
 
 import argparse
-import asyncio
 import random
 import json
 import logging
@@ -14,7 +19,7 @@ from dotenv import load_dotenv
 from livekit import api
 
 # Load environment variables
-load_dotenv(".env")
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 async def main():
     parser = argparse.ArgumentParser(description="Make an outbound call via LiveKit Agent.")
@@ -69,18 +74,11 @@ async def main():
         pass
         
     except Exception as e:
+        print(f"Error: dispatch failed — {e}", file=sys.stderr)
         sys.exit(1)
     
     finally:
         await lk_api.aclose()
-        
-    print(json.dumps({
-        "userid": args.userid,
-        "call_status": "completed",
-        "duration_seconds": 0,
-        "summary": "",
-        "sentiment": "neutral"
-    }))
 
 if __name__ == "__main__":
     asyncio.run(main())

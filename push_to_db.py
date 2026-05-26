@@ -16,10 +16,6 @@ load_dotenv()
 DB_CONNECTION_STRING = os.getenv("DATABASE_URL")
 
 def parse_budget(budget_str):
-    """
-    Placeholder to parse string budgets like 'under 1 crore' to numeric values.
-    You can implement logic here if your system requires strict integers.
-    """
     return 0
 
 def map_call_result_to_preferences(call_data):
@@ -76,21 +72,32 @@ def push_single_to_db(call_data):
     try:
         conn = psycopg2.connect(DB_CONNECTION_STRING)
         cursor = conn.cursor()
-        
+
         name = call_data.get('name') or ''
         phone_number = call_data.get('phone_number') or ''
         lead_id = call_data.get('lead_id') or ''
-        
-        # The schema requires client_mobile. If unknown, we set a fallback.
+
+        # Guard against duplicates: skip if a record for this lead_id was inserted
+        # in the last 120 seconds (handles agent restarts / double-saves in same call).
+        if lead_id:
+            cursor.execute("""
+                SELECT id FROM "client_Requirements"
+                WHERE lead_id = %s
+                  AND created_at >= NOW() - INTERVAL '120 seconds'
+                LIMIT 1;
+            """, (lead_id,))
+            if cursor.fetchone():
+                print(f"Duplicate skipped: lead_id={lead_id!r} already inserted within the last 120s.")
+                cursor.close()
+                conn.close()
+                return None
+
         client_mobile = phone_number if phone_number else 'Unknown'
         requirement_name = f"Requirement for {name}" if name else "New Voice Lead Requirement"
-        
+
         preferences = map_call_result_to_preferences(call_data)
-        
-        # Extract additional notes to store in lr_notes
         additional_notes = call_data.get('answers', {}).get('additional_notes', '')
-        
-        # We use double quotes for the table name to ensure case sensitivity is respected
+
         insert_query = """
         INSERT INTO "client_Requirements" (
             client_mobile, requirement_name, preferences, lead_name, lead_mobile, lr_notes, lead_id
@@ -98,7 +105,7 @@ def push_single_to_db(call_data):
             %s, %s, %s, %s, %s, %s, %s
         ) RETURNING id;
         """
-        
+
         cursor.execute(insert_query, (
             client_mobile,
             requirement_name,
@@ -108,13 +115,13 @@ def push_single_to_db(call_data):
             additional_notes,
             lead_id
         ))
-        
+
         inserted_id = cursor.fetchone()[0]
         conn.commit()
         cursor.close()
         conn.close()
         return inserted_id
-        
+
     except Exception as e:
         print(f"Error inserting data to DB: {e}")
         return None

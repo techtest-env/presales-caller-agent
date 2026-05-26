@@ -68,6 +68,8 @@ def main():
     time.sleep(8)  # Increased from 5s - give agent time to boot and register with LiveKit
 
     # Step 2 — Make the call
+    call_start_time = time.time()
+
     call_result = run_command([
         venv_python, "make_call.py",
         "--userid", args.userid,
@@ -82,12 +84,18 @@ def main():
         }))
         sys.exit(1)
 
-    # make_call.py just initiates the call and exits, but we want main.py to block 
-    # until the agent has actually finished the call and shut down.
-    agent_process.wait()
+    # Step 3 — Poll for the result file written by the agent at call end.
+    # The agent process stays alive after the call, so we can't use wait().
+    result_files = []
+    deadline = call_start_time + 600  # 10-minute max call duration
+    while time.time() < deadline:
+        files = glob.glob(f"call_results/lead_{args.userid}_*.json")
+        new_files = [f for f in files if os.path.getctime(f) >= call_start_time]
+        if new_files:
+            result_files = new_files
+            break
+        time.sleep(2)
 
-    # Step 3 — Find the actual saved JSON result
-    result_files = glob.glob(f"call_results/lead_{args.userid}_*.json")
     if not result_files:
         print(json.dumps({
             "userid": args.userid,
