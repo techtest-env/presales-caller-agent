@@ -3,7 +3,6 @@ import subprocess
 import sys
 import json
 import time
-import socket
 import threading
 import glob
 import os

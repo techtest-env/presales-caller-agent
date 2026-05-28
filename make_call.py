@@ -14,7 +14,6 @@ import argparse
 import random
 import json
 import logging
-import sys
 from dotenv import load_dotenv
 from livekit import api
 
@@ -68,11 +67,6 @@ async def main():
         
         dispatch = await lk_api.agent_dispatch.create_dispatch(dispatch_request)
 
-        # We suppress normal print logs by just omitting them or we can leave them 
-        # but the JSON needs to be printed at the very end
-        # The prompt asked: And at the end of the script, print a JSON result to stdout like this...
-        pass
-        
     except Exception as e:
         print(f"Error: dispatch failed — {e}", file=sys.stderr)
         sys.exit(1)

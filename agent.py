@@ -14,10 +14,13 @@ os.environ['SSL_CERT_FILE'] = certifi.where()
 import logging
 import json
 import re
+import time
+import tempfile
+import httpx
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-from livekit import agents, api
+from livekit import agents, api, rtc
 from livekit.agents import AgentSession, Agent, RoomInputOptions, APIConnectOptions
 from livekit.agents.voice.agent_session import SessionConnectOptions
 from livekit.plugins import (
@@ -34,6 +37,9 @@ load_dotenv(".env")
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("outbound-agent")
+
+logger.info(f"[REC] Supabase URL loaded: {os.environ.get('SUPABASE_URL', 'NOT SET')[:30]}...")
+logger.info(f"[REC] Service role key loaded: {'SET' if os.getenv('SUPABASE_SERVICE_ROLE_KEY') else 'NOT SET'}")
 
 import config
 
@@ -155,13 +161,6 @@ def _build_tts(config_voice: str = None, language_code: str = None):
 #         temperature=0.1,
 #     )
 
-# def _build_llm():  # OPENAI - disabled
-#     return openai.LLM(
-#         model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-#         api_key=os.getenv("OPENAI_API_KEY"),
-#         temperature=0.1,
-#     )
-
 def _build_llm():
     logger.info(f"Using Anthropic LLM | Model: {config.DEFAULT_LLM_MODEL}")
     return anthropic.LLM(
@@ -169,6 +168,122 @@ def _build_llm():
         api_key=os.getenv("ANTHROPIC_API_KEY"),
         temperature=getattr(config, "CLAUDE_TEMPERATURE", 0.1),
     )
+
+
+# ── EGRESS RECORDING (replaces raw audio capture) ──────────
+# Switched from raw WAV capture to LiveKit Egress
+# Both sides of call recorded, pushed to Supabase S3 bucket
+# ────────────────────────────────────────────────────────────
+
+def _sb_headers():
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    return {"Authorization": f"Bearer {key}", "apikey": key}
+
+
+async def _sb_upload(client, bucket, path, data, content_type):
+    base = os.getenv("SUPABASE_URL", "").rstrip("/")
+    if not base:
+        logger.error("[REC] SUPABASE_URL not set — skipping upload")
+        return False
+    try:
+        r = await client.post(
+            f"{base}/storage/v1/object/{bucket}/{path}",
+            content=data,
+            headers={**_sb_headers(), "Content-Type": content_type},
+            timeout=60.0,
+        )
+        if r.status_code not in (200, 201):
+            logger.error(f"[REC] Upload {path} failed: {r.status_code} {r.text[:200]}")
+            return False
+        return True
+    except Exception as e:
+        logger.error(f"[REC] Upload {path} error: {e}")
+        return False
+
+
+async def _sb_signed_url(client, bucket, path, expires_in=31536000):
+    base = os.getenv("SUPABASE_URL", "").rstrip("/")
+    if not base:
+        return None
+    try:
+        r = await client.post(
+            f"{base}/storage/v1/object/sign/{bucket}/{path}",
+            json={"expiresIn": expires_in},
+            headers={**_sb_headers(), "Content-Type": "application/json"},
+            timeout=30.0,
+        )
+        if r.status_code == 200:
+            payload = r.json()
+            # Supabase returns signedURL as "/object/sign/..." (no /storage/v1 prefix)
+            signed = payload.get("signedURL") or payload.get("signedUrl") or ""
+            if signed and not signed.startswith("http"):
+                signed = base + "/storage/v1" + signed
+            return signed or None
+        logger.error(f"[REC] Signed URL {path} failed: {r.status_code} body={r.text[:500]}")
+        return None
+    except Exception as e:
+        logger.error(f"[REC] Signed URL {path} error: {e}")
+        return None
+
+
+def _run_db_migration():
+    db_url = os.getenv("DATABASE_URL", "")
+    if not db_url:
+        return
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url)
+        cur = conn.cursor()
+        cur.execute("ALTER TABLE public.call_recordings ADD COLUMN IF NOT EXISTS transcript_url text;")
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("[REC] DB migration: transcript_url column ensured")
+    except Exception as e:
+        logger.error(f"[REC] DB migration error (non-fatal): {e}")
+
+
+def _insert_recording_row(room_name, lead_name, recording_url, transcript_url, duration_seconds):
+    db_url = os.getenv("DATABASE_URL", "")
+    if not db_url:
+        logger.error("[REC] DATABASE_URL not set — cannot insert call_recordings row")
+        return
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url)
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO public.call_recordings
+               (room_name, lead_name, recording_url, transcript_url, duration_seconds, recorded_at)
+               VALUES (%s, %s, %s, %s, %s, NOW() AT TIME ZONE 'UTC')""",
+            (room_name, lead_name, recording_url, transcript_url, duration_seconds),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info(f"[REC] Inserted call_recordings row for room {room_name}")
+    except Exception as e:
+        logger.error(f"[REC] DB insert error: {e}")
+
+
+async def _upload_transcript_file(client, path, room_name, ts, month):
+    """Upload transcript text file to Supabase Storage. Returns signed URL or None."""
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        s3_path = f"{month}/transcripts/{room_name}_{ts}.txt"
+        ok = await _sb_upload(client, "call-recordings", s3_path, data, "text/plain; charset=utf-8")
+        signed = await _sb_signed_url(client, "call-recordings", s3_path) if ok else None
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        return signed
+    except Exception as e:
+        logger.error(f"[REC] Transcript upload error: {e}")
+        return None
 
 
 class TransferFunctions(llm.ToolContext):
@@ -235,10 +350,25 @@ class TransferFunctions(llm.ToolContext):
             budget: Budget range
             areas: Areas or localities interested in Hyderabad
             bhk: Number of BHK
-            possession_timeline: Possession timeline
-            follow_up_time: Exact date and time for follow-up
+            possession_timeline: ready-to-move or construction timeline e.g. "6 months", "ready now"
+            follow_up_time: callback day and time e.g. "tomorrow 2pm", "Wednesday evening"
             additional_notes: Any additional information shared by the customer
         """
+        def _clean(val: str) -> str:
+            if not val:
+                return ""
+            val = re.sub(r'</?antml[^>]*>', '', val)
+            val = re.sub(r'</?parameter[^>]*>', '', val)
+            return val.strip()
+
+        property_type = _clean(property_type)
+        budget = _clean(budget)
+        areas = _clean(areas)
+        bhk = _clean(bhk)
+        possession_timeline = _clean(possession_timeline)
+        follow_up_time = _clean(follow_up_time)
+        additional_notes = _clean(additional_notes)
+
         logger.info("Agent is ending the call via end_call tool")
 
         formatted_follow_up = parse_follow_up_time(follow_up_time)
@@ -304,6 +434,7 @@ async def entrypoint(ctx: agents.JobContext):
     logger.info(f"Connecting to room: {ctx.room.name}")
     logger.info(f"[CONFIG] SIP_TRUNK_ID={config.SIP_TRUNK_ID!r} | LIVEKIT_URL={os.getenv('LIVEKIT_URL')!r}")
     await ctx.connect()
+    _run_db_migration()
 
     phone_number = None
     lead_id = None
@@ -376,19 +507,24 @@ async def entrypoint(ctx: agents.JobContext):
             logger.error(traceback.format_exc())
             return
 
+    # Build TTS early so we can prewarm the WebSocket pool before the first turn
+    _tts = _build_tts(config_dict.get("voice_id"), language_code=detected_lang["code"])
+    _tts.prewarm()
+    logger.info("[TTS] Warm-up approach: prewarm() called — WebSocket pool pre-warmed")
+
     # Build session objects (event handlers registered before start)
     session = AgentSession(
         vad=silero.VAD.load(
-            min_speech_duration=0.1,
-            min_silence_duration=0.5,
+            min_speech_duration=0.05,
+            min_silence_duration=0.38,
             activation_threshold=0.6,
         ),
         stt=sarvam.STT(model="saaras:v3", mode="transcribe", api_key=os.getenv("SARVAM_API_KEY")),
         llm=_build_llm(),
-        tts=_build_tts(config_dict.get("voice_id"), language_code=detected_lang["code"]),
+        tts=_tts,
         conn_options=SessionConnectOptions(
-            stt_conn_options=APIConnectOptions(timeout=30.0, retry_interval=2.0, max_retry=5),
-            tts_conn_options=APIConnectOptions(timeout=30.0, retry_interval=2.0, max_retry=5),
+            stt_conn_options=APIConnectOptions(timeout=10.0, retry_interval=2.0, max_retry=5),
+            tts_conn_options=APIConnectOptions(timeout=10.0, retry_interval=2.0, max_retry=5),
         ),
         turn_handling={
             "endpointing": {"min_delay": 0.1, "max_delay": 1.0},
@@ -397,6 +533,30 @@ async def entrypoint(ctx: agents.JobContext):
     )
 
     fnc_ctx.session = session
+
+    # ── Transcript init ───────────────────────────────────────
+    _rec_ts = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    _rec_month = datetime.utcnow().strftime("%Y-%m")
+    _rec_s3_path = f"{_rec_month}/{ctx.room.name}_{_rec_ts}.ogg"
+    _transcript_path = os.path.join(tempfile.gettempdir(), f"transcript_{ctx.room.name}_{_rec_ts}.txt")
+    _transcript_file = None
+    try:
+        _transcript_file = open(_transcript_path, "w", encoding="utf-8")
+        logger.info(f"[REC] Transcript opened: {_transcript_path}")
+    except Exception as e:
+        logger.error(f"[REC] Transcript open error: {e}")
+
+    def _write_turn(speaker, text):
+        if not _transcript_file:
+            return
+        try:
+            ts_str = datetime.utcnow().strftime("%H:%M:%S")
+            _transcript_file.write(f"[{ts_str}] {speaker}: {text}\n")
+            _transcript_file.flush()
+        except Exception as exc:
+            logger.error(f"[REC] Transcript write error: {exc}")
+
+    _room_disconnected = asyncio.Event()
 
     @ctx.room.on("disconnected")
     def on_disconnected():
@@ -407,10 +567,16 @@ async def entrypoint(ctx: agents.JobContext):
             "additional_notes": "Call ended abruptly by user hangup"
         })
         logger.info("Job complete. Agent worker remains active for next call.")
+        _room_disconnected.set()
 
     @session.on("user_speech_committed")
     def on_user_speech(event):
-        transcript = getattr(event, "transcript", "") or ""
+        transcript = (
+            getattr(event, "transcript", None)
+            or getattr(event, "text", None)
+            or ""
+        )
+        logger.info(f"[STT] transcript={transcript!r}")
         if not transcript.strip():
             return
         new_lang = _detect_language_code(transcript)
@@ -424,6 +590,32 @@ async def entrypoint(ctx: agents.JobContext):
                 logger.info(f"TTS successfully updated to {new_lang}")
             except Exception as e:
                 logger.error(f"Failed to update TTS language: {e}")
+
+    @session.on("agent_speech_started")
+    def on_agent_speech_started(_event):
+        logger.info(f"[TIMER] TTS start: {time.time():.3f}")
+
+    @session.on("agent_speech_committed")
+    def on_agent_speech_done(_event):
+        logger.info(f"[TIMER] TTS done: {time.time():.3f}")
+
+    # ── Transcript capture ────────────────────────────────────
+    @session.on("user_speech_committed")
+    def on_user_speech_transcript(event):
+        text = getattr(event, "transcript", None) or getattr(event, "text", None) or ""
+        if str(text).strip():
+            _write_turn("USER", str(text).strip())
+
+    @session.on("agent_speech_committed")
+    def on_agent_speech_transcript(event):
+        msg = getattr(event, "message", None)
+        text = ""
+        if msg is not None:
+            text = str(getattr(msg, "content", "") or "")
+        if not text:
+            text = str(getattr(event, "text", "") or "")
+        if text.strip():
+            _write_turn("AGENT", text.strip())
 
     outbound_agent = OutboundAssistant(
         tools=list(fnc_ctx.function_tools.values()),
@@ -440,12 +632,111 @@ async def entrypoint(ctx: agents.JobContext):
         ),
     )
 
+    @session.on("error")
+    def on_session_error(error):
+        logger.error(f"Session error (will attempt recovery): {error}")
+        # Don't let retryable errors kill the session
+
+    # ── EGRESS RECORDING start ────────────────────────────────
+    egress_id = None
+    egress_start_time = None
+    try:
+        s3_output = api.S3Upload(
+            access_key=os.getenv("SUPABASE_S3_ACCESS_KEY", ""),
+            secret=os.getenv("SUPABASE_S3_SECRET_KEY", ""),
+            bucket="call-recordings",
+            region=os.getenv("SUPABASE_S3_REGION", "ap-northeast-1"),
+            endpoint=os.getenv("SUPABASE_S3_ENDPOINT", ""),
+            force_path_style=True,
+        )
+        file_output = api.EncodedFileOutput(
+            filepath=_rec_s3_path,
+            s3=s3_output,
+        )
+        # Find SIP participant's audio track SID for explicit track capture
+        audio_track_sid = None
+        for _p in ctx.room.remote_participants.values():
+            for _pub in _p.track_publications.values():
+                if _pub.kind == rtc.TrackKind.KIND_AUDIO:
+                    audio_track_sid = _pub.sid
+                    break
+            if audio_track_sid:
+                break
+        logger.info(f"[REC] Recording audio track SID: {audio_track_sid}")
+        if audio_track_sid:
+            egress_request = api.TrackCompositeEgressRequest(
+                room_name=ctx.room.name,
+                audio_track_id=audio_track_sid,
+                file_outputs=[file_output],
+            )
+            egress_info = await ctx.api.egress.start_track_composite_egress(egress_request)
+        else:
+            logger.warning("[REC] No audio track found, falling back to RoomCompositeEgress audio_only")
+            egress_request = api.RoomCompositeEgressRequest(
+                room_name=ctx.room.name,
+                audio_only=True,
+                file_outputs=[file_output],
+            )
+            egress_info = await ctx.api.egress.start_room_composite_egress(egress_request)
+        egress_id = egress_info.egress_id
+        egress_start_time = time.time()
+        logger.info(f"[REC] Egress started: egress_id={egress_id} path={_rec_s3_path}")
+    except Exception as e:
+        logger.error(f"[REC] Egress start failed (non-fatal): {e}")
+
     # Only the identity-check line is hardcoded — LLM handles everything after the user's first response
     await session.say(f"Hi! Am I speaking with {lead_name_str}?", allow_interruptions=True)
     logger.info("Greeting spoken. Waiting for user response...")
 
     logger.info("Session is now running. Agent is waiting for user input...")
     await session.wait_for_inactive()
+    # wait_for_inactive() returns when the session idles (e.g. after greeting).
+    # Wait for the room to be fully torn down before stopping Egress and uploading.
+    await _room_disconnected.wait()
+    logger.info("[REC] Room confirmed disconnected — starting finalize.")
+
+    # ── Close transcript ──────────────────────────────────────
+    if _transcript_file:
+        try:
+            _transcript_file.close()
+        except Exception:
+            pass
+
+    # ── Stop Egress + upload transcript + insert DB row ───────
+    recording_url = None
+    duration_seconds = 0
+
+    if egress_id:
+        try:
+            stopped_info = await ctx.api.egress.stop_egress(
+                api.StopEgressRequest(egress_id=egress_id)
+            )
+            if stopped_info.ended_at and stopped_info.started_at:
+                duration_seconds = int(
+                    (stopped_info.ended_at - stopped_info.started_at) / 1_000_000_000
+                )
+            elif egress_start_time:
+                duration_seconds = int(time.time() - egress_start_time)
+            logger.info(f"[REC] Egress stopped. Duration: {duration_seconds}s")
+        except Exception as e:
+            logger.error(f"[REC] Egress stop error: {e}")
+            if egress_start_time:
+                duration_seconds = int(time.time() - egress_start_time)
+
+    async with httpx.AsyncClient() as client:
+        if egress_id:
+            try:
+                recording_url = await _sb_signed_url(client, "call-recordings", _rec_s3_path)
+            except Exception as e:
+                logger.error(f"[REC] Recording signed URL error: {e}")
+        transcript_url = await _upload_transcript_file(
+            client, _transcript_path, ctx.room.name, _rec_ts, _rec_month
+        )
+
+    _insert_recording_row(
+        ctx.room.name, lead_name_str,
+        recording_url, transcript_url, duration_seconds,
+    )
 
 
 if __name__ == "__main__":
