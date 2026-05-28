@@ -20,7 +20,7 @@ import httpx
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-from livekit import agents, api, rtc
+from livekit import agents, api
 from livekit.agents import AgentSession, Agent, RoomInputOptions, APIConnectOptions
 from livekit.agents.voice.agent_session import SessionConnectOptions
 from livekit.plugins import (
@@ -516,7 +516,7 @@ async def entrypoint(ctx: agents.JobContext):
     session = AgentSession(
         vad=silero.VAD.load(
             min_speech_duration=0.05,
-            min_silence_duration=0.38,
+            min_silence_duration=0.35,
             activation_threshold=0.6,
         ),
         stt=sarvam.STT(model="saaras:v3", mode="transcribe", api_key=os.getenv("SARVAM_API_KEY")),
@@ -652,32 +652,17 @@ async def entrypoint(ctx: agents.JobContext):
         file_output = api.EncodedFileOutput(
             filepath=_rec_s3_path,
             s3=s3_output,
+            disable_manifest=True,
         )
-        # Find SIP participant's audio track SID for explicit track capture
-        audio_track_sid = None
-        for _p in ctx.room.remote_participants.values():
-            for _pub in _p.track_publications.values():
-                if _pub.kind == rtc.TrackKind.KIND_AUDIO:
-                    audio_track_sid = _pub.sid
-                    break
-            if audio_track_sid:
-                break
-        logger.info(f"[REC] Recording audio track SID: {audio_track_sid}")
-        if audio_track_sid:
-            egress_request = api.TrackCompositeEgressRequest(
-                room_name=ctx.room.name,
-                audio_track_id=audio_track_sid,
-                file_outputs=[file_output],
-            )
-            egress_info = await ctx.api.egress.start_track_composite_egress(egress_request)
-        else:
-            logger.warning("[REC] No audio track found, falling back to RoomCompositeEgress audio_only")
-            egress_request = api.RoomCompositeEgressRequest(
-                room_name=ctx.room.name,
-                audio_only=True,
-                file_outputs=[file_output],
-            )
-            egress_info = await ctx.api.egress.start_room_composite_egress(egress_request)
+        # CRITICAL: do NOT set layout= or custom_base_url= on RoomCompositeEgressRequest
+        # Setting either forces the video pipeline even with audio_only=True
+        # and will result in a silent recording
+        egress_request = api.RoomCompositeEgressRequest(
+            room_name=ctx.room.name,
+            audio_only=True,
+            file_outputs=[file_output],
+        )
+        egress_info = await ctx.api.egress.start_room_composite_egress(egress_request)
         egress_id = egress_info.egress_id
         egress_start_time = time.time()
         logger.info(f"[REC] Egress started: egress_id={egress_id} path={_rec_s3_path}")
