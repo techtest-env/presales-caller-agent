@@ -150,7 +150,7 @@ def _build_tts(config_voice: str = None, language_code: str = None):
     language = language_code or os.getenv("SARVAM_LANGUAGE", config.SARVAM_LANGUAGE)
     api_key = os.getenv("SARVAM_API_KEY")
     logger.info(f"Using Sarvam TTS | Voice: {voice} | Model: {model} | Language: {language}")
-    return sarvam.TTS(model=model, speaker=voice, target_language_code=language, api_key=api_key, pace=1.25)
+    return sarvam.TTS(model=model, speaker=voice, target_language_code=language, api_key=api_key, pace=1.00)
 
 
 # def _build_llm():  # GROQ - disabled
@@ -340,7 +340,8 @@ class TransferFunctions(llm.ToolContext):
         bhk: str = "",
         possession_timeline: str = "",
         follow_up_time: str = "",
-        additional_notes: str = ""
+        additional_notes: str = "",
+        call_outcome: str = "no_answer"
     ):
         """
         Ends the current call and disconnects the user.
@@ -353,6 +354,7 @@ class TransferFunctions(llm.ToolContext):
             possession_timeline: ready-to-move or construction timeline e.g. "6 months", "ready now"
             follow_up_time: callback day and time e.g. "tomorrow 2pm", "Wednesday evening"
             additional_notes: Any additional information shared by the customer
+            call_outcome: Outcome of the call. One of: qualified, callback_requested, not_interested, wrong_number, wrong_number_new_lead, no_answer, abusive
         """
         def _clean(val: str) -> str:
             if not val:
@@ -368,6 +370,7 @@ class TransferFunctions(llm.ToolContext):
         possession_timeline = _clean(possession_timeline)
         follow_up_time = _clean(follow_up_time)
         additional_notes = _clean(additional_notes)
+        call_outcome = _clean(call_outcome)
 
         logger.info("Agent is ending the call via end_call tool")
 
@@ -395,7 +398,8 @@ class TransferFunctions(llm.ToolContext):
             "bhk": bhk,
             "possession_timeline": possession_timeline,
             "follow_up_time": formatted_follow_up,
-            "additional_notes": additional_notes
+            "additional_notes": additional_notes,
+            "call_outcome": call_outcome
         })
 
         if answers_collected and self.session:
@@ -519,7 +523,7 @@ async def entrypoint(ctx: agents.JobContext):
             min_silence_duration=0.35,
             activation_threshold=0.6,
         ),
-        stt=sarvam.STT(model="saaras:v3", mode="transcribe", api_key=os.getenv("SARVAM_API_KEY")),
+        stt=sarvam.STT(model="saaras:v3", mode="transcribe", api_key=os.getenv("SARVAM_API_KEY"), flush_signal=True),
         llm=_build_llm(),
         tts=_tts,
         conn_options=SessionConnectOptions(
@@ -529,7 +533,9 @@ async def entrypoint(ctx: agents.JobContext):
         turn_handling={
             "endpointing": {"min_delay": 0.1, "max_delay": 1.0},
             "interruption": {"enabled": True, "min_words": 1},
-        }
+        },
+        turn_detection="stt",
+        min_endpointing_delay=0.07,
     )
 
     fnc_ctx.session = session
@@ -564,7 +570,8 @@ async def entrypoint(ctx: agents.JobContext):
         fnc_ctx._save_and_push({
             "property_type": "", "budget": "", "areas": "", "bhk": "",
             "possession_timeline": "", "follow_up_time": "",
-            "additional_notes": "Call ended abruptly by user hangup"
+            "additional_notes": "Call ended abruptly by user hangup",
+            "call_outcome": "no_answer"
         })
         logger.info("Job complete. Agent worker remains active for next call.")
         _room_disconnected.set()
@@ -724,10 +731,16 @@ async def entrypoint(ctx: agents.JobContext):
     )
 
 
+async def prewarm(proc: agents.JobProcess):
+    proc.userdata["vad"] = silero.VAD.load()
+    logger.info("[PREWARM] VAD preloaded for fast cold start")
+
+
 if __name__ == "__main__":
     agents.cli.run_app(
         agents.WorkerOptions(
             entrypoint_fnc=entrypoint,
+            prewarm_fnc=prewarm,
             agent_name="outbound-caller",
         )
     )

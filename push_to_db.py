@@ -64,7 +64,7 @@ def map_call_result_to_preferences(call_data):
     
     return preferences
 
-def push_single_to_db(call_data):
+def _push_qualified_to_db(call_data):
     if not DB_CONNECTION_STRING:
         print("Error: DATABASE_URL is not set. Please add it to your .env file.")
         return None
@@ -124,6 +124,79 @@ def push_single_to_db(call_data):
 
     except Exception as e:
         print(f"Error inserting data to DB: {e}")
+        return None
+
+
+def push_callback_to_db(call_data):
+    """Push callback-requested leads into callback_leads table for the callback n8n workflow."""
+    if not DB_CONNECTION_STRING:
+        print("Error: DATABASE_URL is not set.")
+        return None
+
+    try:
+        conn = psycopg2.connect(DB_CONNECTION_STRING)
+        cursor = conn.cursor()
+
+        name = call_data.get('name') or ''
+        phone_number = call_data.get('phone_number') or ''
+        lead_id = call_data.get('lead_id') or ''
+        answers = call_data.get('answers', {})
+        follow_up_time = answers.get('follow_up_time', '')
+        additional_notes = answers.get('additional_notes', '')
+
+        # Duplicate guard — same 120s window as qualified flow
+        if lead_id:
+            cursor.execute("""
+                SELECT id FROM callback_leads
+                WHERE lead_id = %s
+                  AND created_at >= NOW() - INTERVAL '120 seconds'
+                LIMIT 1;
+            """, (lead_id,))
+            if cursor.fetchone():
+                print(f"Duplicate skipped: lead_id={lead_id!r} already in callback_leads.")
+                cursor.close()
+                conn.close()
+                return None
+
+        cursor.execute("""
+            INSERT INTO callback_leads (
+                lead_name, lead_mobile, lead_id, follow_up_time, additional_notes, created_at
+            ) VALUES (
+                %s, %s, %s, %s, %s, NOW() AT TIME ZONE 'UTC'
+            ) RETURNING id;
+        """, (name, phone_number, lead_id, follow_up_time, additional_notes))
+
+        inserted_id = cursor.fetchone()[0]
+        conn.commit()
+        cursor.close()
+        conn.close()
+        print(f"Callback lead inserted with ID {inserted_id} for {name} ({phone_number})")
+        return inserted_id
+
+    except Exception as e:
+        print(f"Error inserting callback lead: {e}")
+        return None
+
+
+def push_single_to_db(call_data):
+    """
+    Routes call data to the correct table based on call_outcome.
+    - qualified           → client_Requirements (via _push_qualified_to_db)
+    - callback_requested  → callback_leads (via push_callback_to_db)
+    - everything else     → logged and skipped, no DB insert
+    """
+    call_outcome = call_data.get('answers', {}).get('call_outcome', 'no_answer')
+    name = call_data.get('name') or 'Unknown'
+    phone_number = call_data.get('phone_number') or ''
+
+    print(f"[DB ROUTER] outcome={call_outcome!r} | name={name!r} | phone={phone_number!r}")
+
+    if call_outcome == 'qualified':
+        return _push_qualified_to_db(call_data)
+    elif call_outcome == 'callback_requested':
+        return push_callback_to_db(call_data)
+    else:
+        print(f"[DB ROUTER] Skipping — outcome '{call_outcome}' does not require DB insert.")
         return None
 
 
