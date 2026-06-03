@@ -153,14 +153,6 @@ def _build_tts(config_voice: str = None, language_code: str = None):
     return sarvam.TTS(model=model, speaker=voice, target_language_code=language, api_key=api_key, pace=1.00)
 
 
-# def _build_llm():  # GROQ - disabled
-#     return openai.LLM(
-#         base_url="https://api.groq.com/openai/v1",
-#         model=os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"),
-#         api_key=os.getenv("GROQ_API_KEY"),
-#         temperature=0.1,
-#     )
-
 def _build_llm():
     logger.info(f"Using Anthropic LLM | Model: {config.DEFAULT_LLM_MODEL}")
     return anthropic.LLM(
@@ -518,11 +510,7 @@ async def entrypoint(ctx: agents.JobContext):
 
     # Build session objects (event handlers registered before start)
     session = AgentSession(
-        vad=silero.VAD.load(
-            min_speech_duration=0.05,
-            min_silence_duration=0.35,
-            activation_threshold=0.6,
-        ),
+        vad=ctx.proc.userdata.get("vad"),
         stt=sarvam.STT(model="saaras:v3", mode="transcribe", api_key=os.getenv("SARVAM_API_KEY"), flush_signal=True),
         llm=_build_llm(),
         tts=_tts,
@@ -732,7 +720,11 @@ async def entrypoint(ctx: agents.JobContext):
 
 
 async def prewarm(proc: agents.JobProcess):
-    proc.userdata["vad"] = silero.VAD.load()
+    proc.userdata["vad"] = silero.VAD.load(
+        min_speech_duration=0.05,
+        min_silence_duration=0.35,
+        activation_threshold=0.6,
+    )
     logger.info("[PREWARM] VAD preloaded for fast cold start")
 
 

@@ -1,12 +1,9 @@
-import subprocess
+import asyncio
 import sys
-import time
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 app = FastAPI(title="Relai Caller Agent API")
-
-LOG_PATH = "/tmp/agent.log" if sys.platform != "win32" else "agent.log"
 
 class CallRequest(BaseModel):
     userid: str
@@ -15,25 +12,17 @@ class CallRequest(BaseModel):
 
 @app.post("/call")
 async def trigger_call(request: CallRequest):
-    agent_log = open(LOG_PATH, "a")
-    agent_process = subprocess.Popen(
-        [sys.executable, "agent.py", "start"],
-        stdout=agent_log,
-        stderr=subprocess.STDOUT
+    result = await asyncio.create_subprocess_exec(
+        sys.executable, "make_call.py",
+        "--userid", request.userid,
+        "--name", request.name,
+        "--phone", request.phone,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
-    time.sleep(8)  # Wait for agent to boot and register with LiveKit
-
-    result = subprocess.run(
-        [sys.executable, "make_call.py",
-         "--userid", request.userid,
-         "--name", request.name,
-         "--phone", request.phone],
-        capture_output=True,
-        text=True
-    )
+    stdout, stderr = await result.communicate()
     if result.returncode != 0:
-        agent_process.terminate()
-        error_detail = result.stderr.strip() or result.stdout.strip() or "make_call.py exited with no output"
+        error_detail = stderr.decode().strip() or stdout.decode().strip() or "make_call.py exited with no output"
         raise HTTPException(status_code=500, detail=f"Failed to dispatch call: {error_detail}")
 
     return {"status": "success", "message": "Call dispatched"}

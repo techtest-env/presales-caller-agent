@@ -46,3 +46,7 @@ test/
 tests/
 eval/
 evals/
+
+# Runtime call result dumps and KMS logs
+call_results/
+KMS/

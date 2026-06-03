@@ -20,4 +20,4 @@ COPY . .
 EXPOSE 8080
 
 # Run the FastAPI server (which automatically starts the agent worker in the background)
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["sh", "-c", "python agent.py start & uvicorn api:app --host 0.0.0.0 --port 8080"]

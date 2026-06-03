@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { Phone, MessageSquare, Loader2, Sparkles } from 'lucide-react';
 
+
 export default function CallDispatcher() {
     const [phoneNumber, setPhoneNumber] = useState('');
     const [prompt, setPrompt] = useState('');
@@ -14,15 +15,11 @@ export default function CallDispatcher() {
         setStatus('loading');
         setMessage('');
 
-        const form = e.target as HTMLFormElement;
-        const modelProvider = (form.elements.namedItem('modelProvider') as HTMLSelectElement).value;
-        const voice = (form.elements.namedItem('voice') as HTMLSelectElement).value;
-
         try {
             const res = await fetch('/api/dispatch', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ phoneNumber, prompt, modelProvider, voice }),
+                body: JSON.stringify({ phoneNumber, prompt }),
             });
 
             const data = await res.json();
@@ -78,34 +75,6 @@ export default function CallDispatcher() {
                             onChange={(e) => setPrompt(e.target.value)}
                             className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent text-white placeholder-gray-600 outline-none transition-all duration-300 h-28 resize-none"
                         />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-4">
-                        <div className="space-y-2">
-                            <label className="text-sm text-gray-400 font-medium">Model provider</label>
-                            <select
-                                className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-white outline-none focus:ring-2 focus:ring-blue-500"
-                                name="modelProvider"
-                                defaultValue="openai"
-                            >
-                                <option value="openai">OpenAI (GPT-4o)</option>
-                                <option value="groq">Groq (Llama 3)</option>
-                            </select>
-                        </div>
-                        <div className="space-y-2">
-                            <label className="text-sm text-gray-400 font-medium">Voice</label>
-                            <select
-                                className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-white outline-none focus:ring-2 focus:ring-purple-500"
-                                name="voice"
-                                defaultValue="alloy"
-                            >
-                                <option value="alloy">Alloy (US)</option>
-                                <option value="echo">Echo (US)</option>
-                                <option value="shimmer">Shimmer (US)</option>
-                                <option value="anushka">Anushka (Indian - Sarvam)</option>
-                                <option value="aravind">Aravind (Indian - Sarvam)</option>
-                            </select>
-                        </div>
                     </div>
 
                     <button

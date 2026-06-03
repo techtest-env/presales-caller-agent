@@ -69,6 +69,7 @@ def _push_qualified_to_db(call_data):
         print("Error: DATABASE_URL is not set. Please add it to your .env file.")
         return None
 
+    conn = None
     try:
         conn = psycopg2.connect(DB_CONNECTION_STRING)
         cursor = conn.cursor()
@@ -89,7 +90,6 @@ def _push_qualified_to_db(call_data):
             if cursor.fetchone():
                 print(f"Duplicate skipped: lead_id={lead_id!r} already inserted within the last 120s.")
                 cursor.close()
-                conn.close()
                 return None
 
         client_mobile = phone_number if phone_number else 'Unknown'
@@ -119,12 +119,14 @@ def _push_qualified_to_db(call_data):
         inserted_id = cursor.fetchone()[0]
         conn.commit()
         cursor.close()
-        conn.close()
         return inserted_id
 
     except Exception as e:
         print(f"Error inserting data to DB: {e}")
         return None
+    finally:
+        if conn:
+            conn.close()
 
 
 def push_callback_to_db(call_data):
@@ -133,6 +135,7 @@ def push_callback_to_db(call_data):
         print("Error: DATABASE_URL is not set.")
         return None
 
+    conn = None
     try:
         conn = psycopg2.connect(DB_CONNECTION_STRING)
         cursor = conn.cursor()
@@ -155,7 +158,6 @@ def push_callback_to_db(call_data):
             if cursor.fetchone():
                 print(f"Duplicate skipped: lead_id={lead_id!r} already in callback_leads.")
                 cursor.close()
-                conn.close()
                 return None
 
         cursor.execute("""
@@ -169,13 +171,15 @@ def push_callback_to_db(call_data):
         inserted_id = cursor.fetchone()[0]
         conn.commit()
         cursor.close()
-        conn.close()
         print(f"Callback lead inserted with ID {inserted_id} for {name} ({phone_number})")
         return inserted_id
 
     except Exception as e:
         print(f"Error inserting callback lead: {e}")
         return None
+    finally:
+        if conn:
+            conn.close()
 
 
 def push_single_to_db(call_data):
