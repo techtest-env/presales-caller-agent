@@ -719,7 +719,7 @@ async def entrypoint(ctx: agents.JobContext):
     )
 
 
-async def prewarm(proc: agents.JobProcess):
+def prewarm(proc: agents.JobProcess):
     proc.userdata["vad"] = silero.VAD.load(
         min_speech_duration=0.05,
         min_silence_duration=0.35,
