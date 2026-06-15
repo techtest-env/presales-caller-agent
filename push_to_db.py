@@ -31,6 +31,7 @@ def map_call_result_to_preferences(call_data):
     areas_str = answers.get('areas', '').strip()
     bhk_str = answers.get('bhk', '').strip()
     possession_str = answers.get('possession_timeline', '').strip()
+    follow_up_time = answers.get('follow_up_time', '').strip()
     
     # Transform strings into lists for the array fields
     locations = [a.strip() for a in areas_str.split(',')] if areas_str else []
@@ -47,6 +48,7 @@ def map_call_result_to_preferences(call_data):
         "location": areas_str or "Not specified",
         "budgetMax": parse_budget(budget_str),
         "budgetMin": parse_budget(budget_str),
+        "followup_timeline": follow_up_time or "",
         "gatedType": "Not specified",
         "locations": locations,
         "possession": possession_str or "Not decided yet",
