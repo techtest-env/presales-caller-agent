@@ -669,9 +669,9 @@ async def entrypoint(ctx: agents.JobContext):
     logger.info("Greeting spoken. Waiting for user response...")
 
     logger.info("Session is now running. Agent is waiting for user input...")
-    await session.wait_for_inactive()
-    # wait_for_inactive() returns when the session idles (e.g. after greeting).
-    # Wait for the room to be fully torn down before stopping Egress and uploading.
+    # await session.wait_for_inactive()
+    # # wait_for_inactive() returns when the session idles (e.g. after greeting).
+    # # Wait for the room to be fully torn down before stopping Egress and uploading.
     await _room_disconnected.wait()
     logger.info("[REC] Room confirmed disconnected — starting finalize.")
 
